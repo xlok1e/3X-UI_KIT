@@ -4,12 +4,17 @@
 #
 #   kit user add имя [--gb 50] [--days 30] [--devices 3]
 #   kit user list | link имя | limit имя [--gb N] [--days N] | off имя | on имя | del имя
+#   kit backup [файл]
 
 set -Eeuo pipefail
 export LC_ALL=C.UTF-8  # ширина колонок по символам, а не байтам
 
 XUI_ENV=/etc/x-ui/install-result.env
 KIT_ENV=/etc/kit/kit.env
+XUI_DB=/etc/x-ui/x-ui.db
+BACKUP_DIR=/root/kit-backups
+BACKUP_KEEP=14
+BACKUP_PATHS=(/etc/x-ui /etc/kit /etc/kit-sub /etc/default/x-ui /root/cert /root/.acme.sh /root/3x-ui.txt)
 
 if [[ -t 1 ]]; then
   G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; B=$'\e[1m'; D=$'\e[2m'; N=$'\e[0m'
@@ -212,6 +217,33 @@ cmd_del() {
   say "Пользователь $name удалён, его подписка больше не работает."
 }
 
+# Всё, что нужно для «3x-ui.sh --restore»: база панели (снимок без остановки VPN),
+# данные входа, настройки kit и kit-sub, сертификаты.
+cmd_backup() {
+  local out=${1:-$BACKUP_DIR/kit-$(date +%Y%m%d-%H%M).tar.gz} stage p rel=()
+  stage=$(mktemp -d)
+  for p in "${BACKUP_PATHS[@]}"; do
+    [[ -e $p ]] || continue
+    mkdir -p "$stage$(dirname "$p")"
+    cp -a "$p" "$stage$p"
+    rel+=("${p#/}")
+  done
+  rm -f "$stage$XUI_DB" "$stage$XUI_DB-wal" "$stage$XUI_DB-shm"
+  python3 - "$XUI_DB" "$stage$XUI_DB" <<'PY'
+import sqlite3
+import sys
+
+src, dst = sqlite3.connect(sys.argv[1]), sqlite3.connect(sys.argv[2])
+src.backup(dst)
+dst.close()
+src.close()
+PY
+  install -d -m 700 "$BACKUP_DIR" "$(dirname "$out")"
+  (umask 077; tar -czf "$out" -C "$stage" "${rel[@]}")
+  rm -rf "$stage"
+  ls -1t "$BACKUP_DIR"/kit-*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f || true
+  say "Бэкап: $out ($(human "$(stat -c %s "$out")"))"
+}
 
 usage() {
   cat <<EOF
@@ -223,6 +255,7 @@ ${B}kit${N} — пользователи: один пользователь ср
   kit user limit имя [--gb N] [--days N] [--devices N]    изменить лимиты (0 — без ограничений)
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
+  kit backup [файл]                                       бэкап для переезда (3x-ui.sh --restore)
 EOF
 }
 
@@ -234,5 +267,6 @@ case "${1:-} ${2:-}" in
   "user off") cmd_toggle "${3:-}" false ;;
   "user on") cmd_toggle "${3:-}" true ;;
   "user del") shift 2; cmd_del "$@" ;;
+  "backup "*) shift; cmd_backup "$@" ;;
   *) usage ;;
 esac

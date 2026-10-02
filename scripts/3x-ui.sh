@@ -23,6 +23,7 @@ KIT_RAW="https://raw.githubusercontent.com/$KIT_REPO/main/scripts"
 HAPP_ROUTING="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/refs/heads/main/HAPP/DEFAULT.DEEPLINK"
 RESULT=/root/3x-ui.txt
 XUI_ENV=/etc/x-ui/install-result.env
+XUI_DB=/etc/x-ui/x-ui.db
 # Сайты для маскировки REALITY: нужны TLS 1.3 и HTTP/2. Берём первый доступный.
 # Apple, iCloud, Microsoft и домены .ru сам Xray не советует — их тут нет.
 SNI_CANDIDATES=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com)
@@ -131,7 +132,7 @@ main() {
     warn "Панель 3X-UI удалена, но остались файлы прошлой установки — убираю их."
     systemctl disable --now kit-sub >/dev/null 2>&1 || true
     rm -rf /etc/systemd/system/kit-sub.service /usr/local/lib/kit-sub /etc/kit-sub /etc/kit /usr/local/bin/kit \
-      /etc/cron.d/kit-nginx-reload /etc/cron.d/kit-xui-menu "$RESULT"
+      /etc/cron.d/kit-nginx-reload /etc/cron.d/kit-xui-menu /etc/cron.d/kit-backup "$RESULT"
     systemctl daemon-reload
     # Наш nginx держит 443 — без этого проверка порта ниже не пустит REALITY.
     if [[ -f /etc/nginx/kit-stream.conf ]]; then
@@ -144,7 +145,7 @@ main() {
     die "3X-UI уже установлена другим способом — не трогаю её. Удалите её (x-ui uninstall) или добавьте REALITY в панели вручную."
   fi
 
-  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no
+  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no RESTORE=""
   while [[ $# -gt 0 ]]; do
     case $1 in
       --port) PORT=$2; shift 2 ;;
@@ -154,6 +155,7 @@ main() {
       --user) NAME=$2; shift 2 ;;
       --protocols) protos=$2; shift 2 ;;
       --happ-routing) HAPP_ROUTING=$2; shift 2 ;;
+      --restore) RESTORE=$2; shift 2 ;;
       --cert) ucert=$2; shift 2 ;;
       --multi-port) multi=yes; shift ;;
       --key) ukey=$2; shift 2 ;;
@@ -167,6 +169,7 @@ main() {
   [[ $NAME =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || die "Имя: латиница, цифры, _ . - (до 32 символов)."
   [[ $PANEL_SSL =~ ^(auto|ip|none)$ ]] || die "--panel-ssl: auto, ip или none"
   [[ -n $HAPP_ROUTING ]] || die "--happ-routing: ссылка на профиль, happ://… или none"
+  if [[ -n $RESTORE ]]; then restore "$RESTORE"; return; fi
   if [[ -n $ucert || -n $ukey ]]; then
     [[ -s $ucert && -s $ukey ]] || die "Нужны оба файла: --cert fullchain.pem --key privkey.pem"
     openssl x509 -in "$ucert" -noout 2>/dev/null || die "$ucert — не сертификат в формате PEM"
@@ -201,10 +204,7 @@ main() {
     install -m 600 "$ukey" /root/cert/custom/privkey.pem
   fi
 
-  say "Ставлю пакеты: curl, jq, openssl, qrencode, ufw"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
-  apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron >/dev/null
+  install_packages
 
   HOST=${HOST:-$(public_ip)}
   [[ -n $HOST ]] || die "Не удалось узнать внешний IP. Укажите его: --host 1.2.3.4"
@@ -228,39 +228,17 @@ main() {
   SNI2=${SNI2:-$SNI}; SNI3=${SNI3:-www.cloudflare.com}
 
   # --- официальный установщик 3X-UI с закреплённой версией ---
-  local panel_port panel_path panel_user panel_pass tmp
-  panel_port=$(free_port)
-  panel_path=$(rand_str 18)
-  panel_user=$(rand_str 10)
-  panel_pass=$(rand_str 20)
   if [[ -f $XUI_ENV ]]; then
     say "3X-UI уже стоит после прошлого запуска — продолжаю с создания подключений"
   else
-  tmp=$(mktemp)
-  say "Ставлю 3X-UI $XUI_VERSION официальным установщиком (пара минут)"
-  curl -fsSL --retry 3 -o "$tmp" "https://raw.githubusercontent.com/$XUI_REPO/$XUI_VERSION/install.sh"
-  if ! XUI_NONINTERACTIVE=1 XUI_SSL_MODE="${PANEL_SSL/custom/none}" XUI_SERVER_IP="$HOST" \
-      XUI_PANEL_PORT="$panel_port" XUI_WEB_BASE_PATH="$panel_path" \
-      XUI_USERNAME="$panel_user" XUI_PASSWORD="$panel_pass" \
-      bash "$tmp" "$XUI_VERSION" </dev/null >/var/log/3x-ui-install.log 2>&1; then
-    tail -20 /var/log/3x-ui-install.log >&2
-    die "Установщик 3X-UI завершился с ошибкой. Полный лог: /var/log/3x-ui-install.log"
-  fi
-  rm -f "$tmp"
+    run_xui_installer "${PANEL_SSL/custom/none}" "$HOST"
   fi
   [[ -f $XUI_ENV ]] || die "Установщик не сохранил данные входа. Лог: /var/log/3x-ui-install.log"
 
   # Данные для входа — из файла, который пишет сам установщик.
   # shellcheck disable=SC1090
   . "$XUI_ENV"
-  TOKEN=$XUI_API_TOKEN
-  # Панель может уже работать по HTTPS (сертификат ставится после установщика) — пробуем оба.
-  local scheme
-  for scheme in https http; do
-    API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
-    curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $XUI_API_TOKEN" "$API/server/getNewUUID" 2>/dev/null && break
-  done
-  wait_panel
+  connect_api
 
   if [[ $PANEL_SSL == custom ]]; then
     say "Подключаю ваш сертификат к панели"
@@ -281,18 +259,7 @@ main() {
   fi
 
   # --- ядро Xray, совместимое со всеми клиентами ---
-  local cur_core
-  cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
-  if [[ $cur_core != "$XRAY_CORE" ]]; then
-    say "Ставлю ядро Xray $XRAY_CORE (совместимо с Hiddify, Mihomo и другими клиентами)"
-    api POST "server/installXray/$XRAY_CORE" '{}' >/dev/null
-    for _ in $(seq 1 30); do
-      cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
-      [[ $cur_core == "$XRAY_CORE" ]] && break
-      sleep 2
-    done
-    [[ $cur_core == "$XRAY_CORE" ]] || warn "Не удалось сменить ядро Xray (сейчас $cur_core). Клиенты на Mihomo и sing-box могут не подключиться."
-  fi
+  ensure_xray_core
 
   # --- сертификат для протоколов с TLS ---
   setup_tls_cert
@@ -321,18 +288,7 @@ main() {
   brand_xui_menu
 
   # --- файрвол ---
-  if [[ $UFW == yes ]]; then
-    local ssh_port
-    ssh_port=$(ss -H -ltnp 2>/dev/null | awk '/sshd/ {sub(/.*:/,"",$4); print $4; exit}')
-    ssh_port=${ssh_port:-22}
-    OPEN+=("$ssh_port/tcp")
-    [[ $TRUSTED == yes && $SINGLE == no ]] && OPEN+=("$XUI_PANEL_PORT/tcp" "$SUB_PORT/tcp")
-    [[ $PANEL_SSL == ip ]] && OPEN+=("80/tcp")
-    say "Настраиваю ufw: ${OPEN[*]}"
-    local o
-    for o in "${OPEN[@]}"; do ufw allow "$o" >/dev/null; done
-    ufw --force enable >/dev/null || warn "ufw не включился (так бывает в контейнерах) — откройте порты у хостера вручную."
-  fi
+  if [[ $UFW == yes ]]; then setup_ufw; fi
 
   # --- итог ---
   local panel_url links
@@ -399,6 +355,130 @@ main() {
   echo "Дополнительные пользователи — одной командой, сразу во все протоколы, со своей подпиской:"
   echo "  ${B}kit user add sasha --gb 50 --days 30${N}"
   echo "  ${B}kit user list${N}     — кто сколько израсходовал и до какого числа"
+}
+
+# ---------- общие шаги установки и восстановления ----------
+
+install_packages() {
+  say "Ставлю пакеты: curl, jq, openssl, qrencode, ufw"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq curl jq openssl qrencode ca-certificates iproute2 ufw socat cron python3 >/dev/null
+}
+
+run_xui_installer() { # ssl-режим ip-сервера
+  local tmp
+  tmp=$(mktemp)
+  say "Ставлю 3X-UI $XUI_VERSION официальным установщиком (пара минут)"
+  curl -fsSL --retry 3 -o "$tmp" "https://raw.githubusercontent.com/$XUI_REPO/$XUI_VERSION/install.sh"
+  if ! XUI_NONINTERACTIVE=1 XUI_SSL_MODE="$1" XUI_SERVER_IP="$2" \
+      XUI_PANEL_PORT="$(free_port)" XUI_WEB_BASE_PATH="$(rand_str 18)" \
+      XUI_USERNAME="$(rand_str 10)" XUI_PASSWORD="$(rand_str 20)" \
+      bash "$tmp" "$XUI_VERSION" </dev/null >/var/log/3x-ui-install.log 2>&1; then
+    tail -20 /var/log/3x-ui-install.log >&2
+    die "Установщик 3X-UI завершился с ошибкой. Полный лог: /var/log/3x-ui-install.log"
+  fi
+  rm -f "$tmp"
+}
+
+# Панель может работать по HTTP или HTTPS (зависит от сертификата) — ждём ответа по любому.
+connect_api() {
+  local i scheme
+  TOKEN=$XUI_API_TOKEN
+  for i in $(seq 1 60); do
+    for scheme in https http; do
+      API="$scheme://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
+      curl -fsk -m 5 -o /dev/null -H "Authorization: Bearer $TOKEN" "$API/server/getNewUUID" 2>/dev/null && return 0
+    done
+    sleep 2
+  done
+  die "Панель не отвечает. Лог: journalctl -u x-ui -n 50"
+}
+
+ensure_xray_core() {
+  local cur_core
+  cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
+  [[ $cur_core == "$XRAY_CORE" ]] && return
+  say "Ставлю ядро Xray $XRAY_CORE (совместимо с Hiddify, Mihomo и другими клиентами)"
+  api POST "server/installXray/$XRAY_CORE" '{}' >/dev/null
+  for _ in $(seq 1 30); do
+    cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
+    [[ $cur_core == "$XRAY_CORE" ]] && return
+    sleep 2
+  done
+  warn "Не удалось сменить ядро Xray (сейчас $cur_core). Клиенты на Mihomo и sing-box могут не подключиться."
+}
+
+setup_ufw() {
+  local ssh_port o
+  ssh_port=$(ss -H -ltnp 2>/dev/null | awk '/sshd/ {sub(/.*:/,"",$4); print $4; exit}')
+  OPEN+=("${ssh_port:-22}/tcp")
+  [[ $TRUSTED == yes && $SINGLE == no ]] && OPEN+=("$XUI_PANEL_PORT/tcp" "$SUB_PORT/tcp")
+  [[ $PANEL_SSL == ip ]] && OPEN+=("80/tcp")
+  say "Настраиваю ufw: ${OPEN[*]}"
+  for o in "${OPEN[@]}"; do ufw allow "$o" >/dev/null; done
+  ufw --force enable >/dev/null || warn "ufw не включился (так бывает в контейнерах) — откройте порты у хостера вручную."
+}
+
+# ---------- восстановление из бэкапа (kit backup) ----------
+
+# Порты подключений, которые слушают снаружи, — по протоколу.
+restore_ports() { # список подключений (JSON)
+  local port protocol
+  while IFS=$'\t' read -r port protocol; do
+    case $protocol in
+      hysteria|tuic|wireguard|amneziawg) open_port "$port" udp ;;
+      shadowsocks) open_port "$port" both ;;
+      *) open_port "$port" tcp ;;
+    esac
+  done < <(jq -r '.[] | select(.enable and (.listen // "") != "127.0.0.1") | [.port, .protocol] | @tsv' <<<"$1")
+}
+
+# Чистый сервер + архив: та же панель, те же пользователи и ключи. Ссылки ведут на домен,
+# поэтому после смены A-записи клиенты подключаются без новой подписки.
+restore() { # архив
+  local arc=$1 tmp ip list
+  [[ -s $arc ]] || die "Нет файла бэкапа: $arc"
+  [[ ! -d /usr/local/x-ui ]] || die "Восстанавливать можно только на чистый сервер: здесь уже стоит 3X-UI."
+  tmp=$(mktemp -d)
+  tar -xzf "$arc" -C "$tmp" || die "Архив повреждён: $arc"
+  [[ -s $tmp$XUI_DB && -s $tmp$XUI_ENV && -s $tmp/etc/kit/kit.env ]] || die "В архиве нет базы панели или настроек kit."
+  [[ -s $tmp/root/cert/custom/fullchain.pem ]] || die "В архиве нет сертификата домена (/root/cert/custom)."
+  HOST=$(. "$tmp/etc/kit/kit.env"; echo "$HOST")
+  rm -rf "$tmp"
+  [[ ! $HOST =~ ^[0-9.]+$ ]] || die "Бэкап сделан на установке с IP ($HOST): ссылки ведут на старый сервер. Переезд без смены подписок работает только с доменом."
+
+  install_packages
+  ip=$(public_ip)
+  run_xui_installer none "$ip"
+  say "Переношу базу панели, сертификаты и настройки из $arc"
+  systemctl stop x-ui
+  tar -xzf "$arc" -C /
+  systemctl start x-ui
+  # shellcheck disable=SC1090
+  . "$XUI_ENV"
+  connect_api
+  ensure_xray_core
+
+  # Маршрутизация Happ уже в базе — не перезаписываем её профилем по умолчанию.
+  PANEL_SSL=custom; TRUSTED=yes; HAPP_ROUTING=none; SUBID=""
+  setup_tls_cert
+  list=$(api GET inbounds/list)
+  if jq -e 'any(.[]; .remark == "REALITY" and .listen == "127.0.0.1")' <<<"$list" >/dev/null; then SINGLE=yes; fi
+  restore_ports "$list"
+  setup_subscription
+  if [[ $SINGLE == yes ]]; then setup_nginx; fi
+  install_kit_cli
+  brand_xui_menu
+  if [[ $UFW == yes ]]; then setup_ufw; fi
+
+  echo
+  echo "${G}${B}Готово! Сервер восстановлен из бэкапа.${N}"
+  echo
+  echo "Панель, логин и пароль — прежние: ${B}cat $RESULT${N}"
+  echo
+  echo "Осталось сменить A-запись ${B}$HOST${N} на ${B}$ip${N} (DNS only)."
+  echo "Клиентам ничего менять не нужно: после обновления DNS они подключатся сами."
 }
 
 # ---------- сертификат ----------
@@ -736,6 +816,7 @@ install_kit_cli() {
   if [[ -n $src ]]; then install -m 755 "$src" /usr/local/bin/kit
   else curl -fsSL --retry 3 -o /usr/local/bin/kit "$KIT_CLI_URL" && chmod 755 /usr/local/bin/kit; fi
   bash -n /usr/local/bin/kit || die "Команда kit скачалась повреждённой"
+  echo '41 4 * * * root /usr/local/bin/kit backup >/dev/null 2>&1' >/etc/cron.d/kit-backup
 }
 
 KIT_INSTALL_CMD="bash <(curl -fsSL $KIT_RAW/3x-ui.sh)"
@@ -1009,6 +1090,8 @@ usage() {
   --happ-routing URL  профиль маршрутизации Happ (ссылка на deeplink или happ://…);
                       по умолчанию RoscomVPN, none — не включать
   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
+  --restore файл      поднять сервер из бэкапа «kit backup» (только на чистом сервере
+                      и только для установки с доменом), затем сменить A-запись
   --no-ufw            не трогать файрвол
   -y                  не задавать вопросов
 EOF
