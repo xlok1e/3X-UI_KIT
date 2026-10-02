@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 3X-UI со всеми протоколами одной командой — https://github.com/itsnotkubrick/3X-UI_KIT
 #
-# Установка:  bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/3x-ui.sh)
+# Установка:  bash <(curl -fsSL https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/3x-ui.sh)
 #
 # Ставит официальную панель 3X-UI (версия закреплена ниже) её собственным
 # установщиком, получает сертификат Let's Encrypt на IP, создаёт подключения
@@ -18,6 +18,8 @@ XUI_VERSION="v3.8.5"
 # 26.6.27 — последняя версия, с которой работают все клиенты и которую принимает 3X-UI.
 XRAY_CORE="v26.6.27"
 XUI_REPO="MHSanaei/3x-ui"
+KIT_REPO="xlok1e/3X-UI_KIT"
+KIT_RAW="https://raw.githubusercontent.com/$KIT_REPO/main/scripts"
 RESULT=/root/3x-ui.txt
 XUI_ENV=/etc/x-ui/install-result.env
 # Сайты для маскировки REALITY: нужны TLS 1.3 и HTTP/2. Берём первый доступный.
@@ -712,7 +714,7 @@ awg_attach() { # имя subId [лимит-байт] [срок-мс] [устро�
   done
 }
 
-KIT_CLI_URL="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/kit.sh"
+KIT_CLI_URL="$KIT_RAW/kit.sh"
 
 install_kit_cli() {
   install -d -m 700 /etc/kit
@@ -733,7 +735,7 @@ install_kit_cli() {
   bash -n /usr/local/bin/kit || die "Команда kit скачалась повреждённой"
 }
 
-KIT_INSTALL_CMD="bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/3x-ui.sh)"
+KIT_INSTALL_CMD="bash <(curl -fsSL $KIT_RAW/3x-ui.sh)"
 
 # После «x-ui → Uninstall» меню подсказывает команду официального установщика —
 # меняем её на нашу. Только в echo: вызов установщика в «Update» не трогаем.
@@ -910,7 +912,7 @@ setup_subscription() {
   SUB_FETCH="$(if [[ $TRUSTED == yes ]]; then echo https; else echo http; fi)://$HOST:$SUB_PORT$SUB_PATH$SUBID"
 }
 
-KIT_SUB_URL="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/kit-sub.py"
+KIT_SUB_URL="$KIT_RAW/kit-sub.py"
 
 install_kit_sub() {
   say "Ставлю подписку с учётом приложения (kit-sub)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hysteria2 одной командой — https://github.com/itsnotkubrick/3X-UI_KIT
 #
-# Установка:   bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/hysteria2.sh)
+# Установка:   bash <(curl -fsSL https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/hysteria2.sh)
 # Управление:  hy2 help
 #
 # Ставит официальный бинарник Hysteria2 (версия закреплена ниже, контрольная
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 
 HY_VERSION="2.12.3"
 HY_REPO="HyNetworks/hysteria"
-SELF_URL="https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/hysteria2.sh"
+SELF_URL="https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/hysteria2.sh"
 
 BIN=/usr/local/bin/hysteria
 CLI=/usr/local/bin/hy2
