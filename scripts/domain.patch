@@ -1,0 +1,122 @@
+diff --git a/scripts/3x-ui.sh b/scripts/3x-ui.sh
+index 062b328..bdde0e8 100755
+--- a/scripts/3x-ui.sh
++++ b/scripts/3x-ui.sh
+@@ -24,6 +24,8 @@ HAPP_ROUTING="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/r
+ RESULT=/root/3x-ui.txt
+ XUI_ENV=/etc/x-ui/install-result.env
+ XUI_DB=/etc/x-ui/x-ui.db
++ACME=/root/.acme.sh/acme.sh
++CERT_DIR=/root/cert/custom
+ # Сайты для маскировки REALITY: нужны TLS 1.3 и HTTP/2. Берём первый доступный.
+ # Apple, iCloud, Microsoft и домены .ru сам Xray не советует — их тут нет.
+ SNI_CANDIDATES=(dl.google.com www.amazon.com www.samsung.com www.yahoo.com)
+@@ -145,13 +147,14 @@ main() {
+     die "3X-UI уже установлена другим способом — не трогаю её. Удалите её (x-ui uninstall) или добавьте REALITY в панели вручную."
+   fi
+ 
+-  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no RESTORE=""
++  local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no RESTORE="" DOMAIN=""
+   while [[ $# -gt 0 ]]; do
+     case $1 in
+       --port) PORT=$2; shift 2 ;;
+       --sni) SNI=$2; shift 2 ;;
+       --panel-ssl) PANEL_SSL=$2; shift 2 ;;
+       --host) HOST=$2; shift 2 ;;
++      --domain) DOMAIN=$2; shift 2 ;;
+       --user) NAME=$2; shift 2 ;;
+       --protocols) protos=$2; shift 2 ;;
+       --happ-routing) HAPP_ROUTING=$2; shift 2 ;;
+@@ -170,6 +173,11 @@ main() {
+   [[ $PANEL_SSL =~ ^(auto|ip|none)$ ]] || die "--panel-ssl: auto, ip или none"
+   [[ -n $HAPP_ROUTING ]] || die "--happ-routing: ссылка на профиль, happ://… или none"
+   if [[ -n $RESTORE ]]; then restore "$RESTORE"; return; fi
++  if [[ -n $DOMAIN ]]; then
++    [[ $DOMAIN =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "Похоже, это не домен: $DOMAIN"
++    [[ -z $ucert && -z $ukey ]] || die "С --domain сертификат выпустится сам — --cert и --key не нужны."
++    HOST=$DOMAIN; PANEL_SSL=custom
++  fi
+   if [[ -n $ucert || -n $ukey ]]; then
+     [[ -s $ucert && -s $ukey ]] || die "Нужны оба файла: --cert fullchain.pem --key privkey.pem"
+     openssl x509 -in "$ucert" -noout 2>/dev/null || die "$ucert — не сертификат в формате PEM"
+@@ -195,16 +203,18 @@ main() {
+     fi
+   fi
+   [[ $PANEL_SSL == ip ]] && port_busy 80 tcp && die "Для сертификата панели нужен свободный порт 80/tcp."
++  [[ -n $DOMAIN ]] && port_busy 80 tcp && die "Для сертификата домена нужен свободный порт 80/tcp."
+   # Доверенный сертификат (Let's Encrypt или свой) — панель и подписка доступны снаружи по HTTPS.
+   TRUSTED=no
+   [[ $PANEL_SSL == ip || $PANEL_SSL == custom ]] && TRUSTED=yes
+-  if [[ $PANEL_SSL == custom ]]; then
+-    mkdir -p /root/cert/custom
+-    install -m 644 "$ucert" /root/cert/custom/fullchain.pem
+-    install -m 600 "$ukey" /root/cert/custom/privkey.pem
++  if [[ -n $ucert ]]; then
++    mkdir -p "$CERT_DIR"
++    install -m 644 "$ucert" "$CERT_DIR/fullchain.pem"
++    install -m 600 "$ukey" "$CERT_DIR/privkey.pem"
+   fi
+ 
+   install_packages
++  if [[ -n $DOMAIN ]]; then issue_domain_cert; fi
+ 
+   HOST=${HOST:-$(public_ip)}
+   [[ -n $HOST ]] || die "Не удалось узнать внешний IP. Укажите его: --host 1.2.3.4"
+@@ -414,12 +424,36 @@ setup_ufw() {
+   ssh_port=$(ss -H -ltnp 2>/dev/null | awk '/sshd/ {sub(/.*:/,"",$4); print $4; exit}')
+   OPEN+=("${ssh_port:-22}/tcp")
+   [[ $TRUSTED == yes && $SINGLE == no ]] && OPEN+=("$XUI_PANEL_PORT/tcp" "$SUB_PORT/tcp")
+-  [[ $PANEL_SSL == ip ]] && OPEN+=("80/tcp")
++  [[ $PANEL_SSL == ip || -n $DOMAIN ]] && OPEN+=("80/tcp")
+   say "Настраиваю ufw: ${OPEN[*]}"
+   for o in "${OPEN[@]}"; do ufw allow "$o" >/dev/null; done
+   ufw --force enable >/dev/null || warn "ufw не включился (так бывает в контейнерах) — откройте порты у хостера вручную."
+ }
+ 
++# Let's Encrypt для домена через acme.sh: проверка по HTTP на порту 80 (сам acme.sh,
++# без веб-сервера), продление — его же cron. После продления перечитываем сертификат.
++issue_domain_cert() {
++  local ip resolved log=/var/log/kit-acme.log rc=0
++  ip=$(public_ip)
++  resolved=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk 'NR==1 {print $1}') || true
++  [[ -n $resolved ]] || die "Домен $DOMAIN не найден в DNS. Создайте A-запись на $ip (DNS only) и подождите пару минут."
++  [[ $resolved == "$ip" ]] || die "Домен $DOMAIN указывает на $resolved, а IP сервера $ip. Исправьте A-запись (DNS only, без прокси Cloudflare)."
++  if [[ ! -x $ACME ]]; then
++    say "Ставлю acme.sh"
++    curl -fsSL https://get.acme.sh | sh -s >"$log" 2>&1 || die "acme.sh не установился. Лог: $log"
++  fi
++  say "Выпускаю сертификат Let's Encrypt для ${B}$DOMAIN${N}"
++  "$ACME" --set-default-ca --server letsencrypt >>"$log" 2>&1
++  "$ACME" --issue -d "$DOMAIN" --standalone --keylength ec-256 >>"$log" 2>&1 || rc=$?
++  # 2 — сертификат уже есть и ещё действует.
++  ((rc == 0 || rc == 2)) || die "Let's Encrypt не выдал сертификат. Проверьте, что порт 80/tcp открыт у хостера. Лог: $log"
++  install -d -m 700 "$CERT_DIR"
++  "$ACME" --install-cert -d "$DOMAIN" --ecc \
++    --fullchain-file "$CERT_DIR/fullchain.pem" --key-file "$CERT_DIR/privkey.pem" \
++    --reloadcmd "systemctl reload nginx 2>/dev/null; systemctl restart x-ui 2>/dev/null; true" >>"$log" 2>&1 \
++    || die "Не удалось установить сертификат. Лог: $log"
++}
++
+ # ---------- восстановление из бэкапа (kit backup) ----------
+ 
+ # Порты подключений, которые слушают снаружи, — по протоколу.
+@@ -461,7 +495,9 @@ restore() { # архив
+   ensure_xray_core
+ 
+   # Маршрутизация Happ уже в базе — не перезаписываем её профилем по умолчанию.
+-  PANEL_SSL=custom; TRUSTED=yes; HAPP_ROUTING=none; SUBID=""
++  PANEL_SSL=custom; TRUSTED=yes; HAPP_ROUTING=none; SUBID=""; DOMAIN=$HOST
++  # Задание продления acme.sh живёт в crontab, а не в бэкапе — ставим заново.
++  if [[ -x $ACME ]]; then "$ACME" --install-cronjob >/dev/null 2>&1 || warn "Не удалось включить продление сертификата: $ACME --install-cronjob"; fi
+   setup_tls_cert
+   list=$(api GET inbounds/list)
+   if jq -e 'any(.[]; .remark == "REALITY" and .listen == "127.0.0.1")' <<<"$list" >/dev/null; then SINGLE=yes; fi
+@@ -1089,6 +1125,8 @@ usage() {
+   --user admin        имя первого клиента
+   --happ-routing URL  профиль маршрутизации Happ (ссылка на deeplink или happ://…);
+                       по умолчанию RoscomVPN, none — не включать
++  --domain имя        домен для ссылок, панели и подписки (A-запись на этот сервер, DNS only):
++                      сертификат Let's Encrypt выпустится и будет продлеваться сам (нужен порт 80)
+   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
+   --restore файл      поднять сервер из бэкапа «kit backup» (только на чистом сервере
+                       и только для установки с доменом), затем сменить A-запись
