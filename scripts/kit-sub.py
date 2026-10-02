@@ -33,8 +33,7 @@ CLASH_UA = re.compile(r"clash|mihomo|flclash|stash|nyanpasu|meta", re.I)
 # тоже могут просить формат Clash (Karing так и делает), но AmneziaWG не умеют.
 NO_AWG_UA = re.compile(r"karing|hiddify|nekobox|sing-?box|husi|stash|shadowrocket|v2box|streisand|happ|loon|surge|quantumult", re.I)
 SUB_ID = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
-PASS_HEADERS = ("content-type", "content-disposition", "profile-title", "profile-update-interval",
-                "profile-web-page-url", "subscription-userinfo", "support-url", "cache-control")
+SKIP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "content-length", "date", "server"}
 
 with open(CONFIG, encoding="utf-8") as f:
     CONF = json.load(f)
@@ -189,11 +188,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"не удалось обработать подписку: {e}")
 
         self.send_response(code)
-        for k in PASS_HEADERS:
-            if k in headers:
-                v = fix_userinfo(headers[k]) if k == "subscription-userinfo" else headers[k]
-                if v:
-                    self.send_header(k.title(), v)
+        for k, v in headers.items():
+            if k in SKIP_HEADERS:
+                continue
+            if k == "subscription-userinfo":
+                v = fix_userinfo(v)
+            if v:
+                self.send_header(k.title(), v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
