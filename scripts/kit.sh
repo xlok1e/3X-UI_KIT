@@ -5,6 +5,7 @@
 #   kit user add имя [--gb 50] [--days 30] [--devices 3]
 #   kit user list | link имя | limit имя [--gb N] [--days N] | off имя | on имя | del имя
 #   kit backup [файл]
+#   kit backup tg токен chat_id
 
 set -Eeuo pipefail
 export LC_ALL=C.UTF-8  # ширина колонок по символам, а не байтам
@@ -14,6 +15,7 @@ KIT_ENV=/etc/kit/kit.env
 XUI_DB=/etc/x-ui/x-ui.db
 BACKUP_DIR=/root/kit-backups
 BACKUP_KEEP=14
+TG_ENV=/etc/kit/telegram.env
 BACKUP_PATHS=(/etc/x-ui /etc/kit /etc/kit-sub /etc/default/x-ui /root/cert /root/.acme.sh /root/3x-ui.txt)
 
 if [[ -t 1 ]]; then
@@ -22,6 +24,7 @@ else
   G=; Y=; R=; B=; D=; N=
 fi
 say()  { printf '%s\n' "${G}==>${N} $*"; }
+warn() { printf '%s\n' "${Y}!${N}  $*" >&2; }
 die()  { printf '%s\n' "${R}✗${N}  $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "Запустите от root: sudo -i, затем команду ещё раз."
@@ -243,6 +246,41 @@ PY
   rm -rf "$stage"
   ls -1t "$BACKUP_DIR"/kit-*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f || true
   say "Бэкап: $out ($(human "$(stat -c %s "$out")"))"
+  if [[ -f $TG_ENV ]]; then send_backup_tg "$out"; fi
+}
+
+# В Telegram уходит только зашифрованная копия: в архиве ключи и пароли.
+send_backup_tg() { # архив
+  local enc="$1.enc" TG_TOKEN TG_CHAT BACKUP_PASS
+  # shellcheck disable=SC1090
+  . "$TG_ENV"
+  BACKUP_PASS=$BACKUP_PASS openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASS -in "$1" -out "$enc"
+  if curl -fsS -m 120 -o /dev/null -F chat_id="$TG_CHAT" -F document=@"$enc" \
+      -F caption="Бэкап $HOST · $(date '+%d.%m.%Y %H:%M')" "https://api.telegram.org/bot$TG_TOKEN/sendDocument"; then
+    say "Отправлен в Telegram (зашифрован)"
+  else
+    warn "Не удалось отправить бэкап в Telegram — архив остался на сервере."
+  fi
+  rm -f "$enc"
+}
+
+cmd_backup_tg() { # токен chat_id
+  local token=${1:-} chat=${2:-} pass=""
+  [[ $token =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "Токен бота от @BotFather, вида 123456789:AA…"
+  [[ $chat =~ ^-?[0-9]+$ ]] || die "chat_id — число (у групп начинается с минуса)."
+  # Пароль не меняем при повторной настройке, иначе старые копии не расшифровать прежним.
+  # shellcheck disable=SC1090
+  [[ -f $TG_ENV ]] && pass=$(. "$TG_ENV"; echo "$BACKUP_PASS")
+  pass=${pass:-$(openssl rand -base64 24)}
+  (umask 077; printf 'TG_TOKEN=%q\nTG_CHAT=%q\nBACKUP_PASS=%q\n' "$token" "$chat" "$pass" >"$TG_ENV")
+  echo
+  echo "Пароль для расшифровки бэкапов — ${B}сохраните его в менеджере паролей${N}:"
+  echo
+  echo "  $pass"
+  echo
+  echo "Без него восстановиться из копии в Telegram не получится."
+  echo
+  cmd_backup
 }
 
 usage() {
@@ -256,6 +294,7 @@ ${B}kit${N} — пользователи: один пользователь ср
   kit user off имя  /  kit user on имя                    выключить и включить
   kit user del имя                                        удалить
   kit backup [файл]                                       бэкап для переезда (3x-ui.sh --restore)
+  kit backup tg токен chat_id                             слать бэкапы в Telegram (зашифрованными)
 EOF
 }
 
@@ -267,6 +306,7 @@ case "${1:-} ${2:-}" in
   "user off") cmd_toggle "${3:-}" false ;;
   "user on") cmd_toggle "${3:-}" true ;;
   "user del") shift 2; cmd_del "$@" ;;
+  "backup tg") shift 2; cmd_backup_tg "$@" ;;
   "backup "*) shift; cmd_backup "$@" ;;
   *) usage ;;
 esac

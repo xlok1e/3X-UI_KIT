@@ -1,0 +1,131 @@
+diff --git a/scripts/3x-ui.sh b/scripts/3x-ui.sh
+index bdde0e8..3f3cf2c 100755
+--- a/scripts/3x-ui.sh
++++ b/scripts/3x-ui.sh
+@@ -470,10 +470,19 @@ restore_ports() { # список подключений (JSON)
+ 
+ # Чистый сервер + архив: та же панель, те же пользователи и ключи. Ссылки ведут на домен,
+ # поэтому после смены A-записи клиенты подключаются без новой подписки.
+-restore() { # архив
+-  local arc=$1 tmp ip list
++restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc из Telegram)
++  local arc=$1 tmp ip list pass
+   [[ -s $arc ]] || die "Нет файла бэкапа: $arc"
+   [[ ! -d /usr/local/x-ui ]] || die "Восстанавливать можно только на чистый сервер: здесь уже стоит 3X-UI."
++  install_packages
++  if [[ $arc == *.enc ]]; then
++    [[ -t 0 ]] || die "Архив зашифрован — запустите восстановление в терминале, чтобы ввести пароль."
++    read -rsp "Пароль бэкапа: " pass; echo
++    tmp=$(mktemp)
++    BACKUP_PASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASS -in "$arc" -out "$tmp" \
++      || die "Неверный пароль или файл повреждён."
++    arc=$tmp
++  fi
+   tmp=$(mktemp -d)
+   tar -xzf "$arc" -C "$tmp" || die "Архив повреждён: $arc"
+   [[ -s $tmp$XUI_DB && -s $tmp$XUI_ENV && -s $tmp/etc/kit/kit.env ]] || die "В архиве нет базы панели или настроек kit."
+@@ -482,7 +491,6 @@ restore() { # архив
+   rm -rf "$tmp"
+   [[ ! $HOST =~ ^[0-9.]+$ ]] || die "Бэкап сделан на установке с IP ($HOST): ссылки ведут на старый сервер. Переезд без смены подписок работает только с доменом."
+ 
+-  install_packages
+   ip=$(public_ip)
+   run_xui_installer none "$ip"
+   say "Переношу базу панели, сертификаты и настройки из $arc"
+@@ -1128,8 +1136,8 @@ usage() {
+   --domain имя        домен для ссылок, панели и подписки (A-запись на этот сервер, DNS only):
+                       сертификат Let's Encrypt выпустится и будет продлеваться сам (нужен порт 80)
+   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
+-  --restore файл      поднять сервер из бэкапа «kit backup» (только на чистом сервере
+-                      и только для установки с доменом), затем сменить A-запись
++  --restore файл      поднять сервер из бэкапа «kit backup» (.tar.gz или .enc из Telegram;
++                      только на чистом сервере и для установки с доменом), затем сменить A-запись
+   --no-ufw            не трогать файрвол
+   -y                  не задавать вопросов
+ EOF
+diff --git a/scripts/kit.sh b/scripts/kit.sh
+index 754f2d3..c57b38f 100644
+--- a/scripts/kit.sh
++++ b/scripts/kit.sh
+@@ -5,6 +5,7 @@
+ #   kit user add имя [--gb 50] [--days 30] [--devices 3]
+ #   kit user list | link имя | limit имя [--gb N] [--days N] | off имя | on имя | del имя
+ #   kit backup [файл]
++#   kit backup tg токен chat_id
+ 
+ set -Eeuo pipefail
+ export LC_ALL=C.UTF-8  # ширина колонок по символам, а не байтам
+@@ -14,6 +15,7 @@ KIT_ENV=/etc/kit/kit.env
+ XUI_DB=/etc/x-ui/x-ui.db
+ BACKUP_DIR=/root/kit-backups
+ BACKUP_KEEP=14
++TG_ENV=/etc/kit/telegram.env
+ BACKUP_PATHS=(/etc/x-ui /etc/kit /etc/kit-sub /etc/default/x-ui /root/cert /root/.acme.sh /root/3x-ui.txt)
+ 
+ if [[ -t 1 ]]; then
+@@ -22,6 +24,7 @@ else
+   G=; Y=; R=; B=; D=; N=
+ fi
+ say()  { printf '%s\n' "${G}==>${N} $*"; }
++warn() { printf '%s\n' "${Y}!${N}  $*" >&2; }
+ die()  { printf '%s\n' "${R}✗${N}  $*" >&2; exit 1; }
+ 
+ [[ $EUID -eq 0 ]] || die "Запустите от root: sudo -i, затем команду ещё раз."
+@@ -243,6 +246,41 @@ PY
+   rm -rf "$stage"
+   ls -1t "$BACKUP_DIR"/kit-*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f || true
+   say "Бэкап: $out ($(human "$(stat -c %s "$out")"))"
++  if [[ -f $TG_ENV ]]; then send_backup_tg "$out"; fi
++}
++
++# В Telegram уходит только зашифрованная копия: в архиве ключи и пароли.
++send_backup_tg() { # архив
++  local enc="$1.enc" TG_TOKEN TG_CHAT BACKUP_PASS
++  # shellcheck disable=SC1090
++  . "$TG_ENV"
++  BACKUP_PASS=$BACKUP_PASS openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASS -in "$1" -out "$enc"
++  if curl -fsS -m 120 -o /dev/null -F chat_id="$TG_CHAT" -F document=@"$enc" \
++      -F caption="Бэкап $HOST · $(date '+%d.%m.%Y %H:%M')" "https://api.telegram.org/bot$TG_TOKEN/sendDocument"; then
++    say "Отправлен в Telegram (зашифрован)"
++  else
++    warn "Не удалось отправить бэкап в Telegram — архив остался на сервере."
++  fi
++  rm -f "$enc"
++}
++
++cmd_backup_tg() { # токен chat_id
++  local token=${1:-} chat=${2:-} pass=""
++  [[ $token =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || die "Токен бота от @BotFather, вида 123456789:AA…"
++  [[ $chat =~ ^-?[0-9]+$ ]] || die "chat_id — число (у групп начинается с минуса)."
++  # Пароль не меняем при повторной настройке, иначе старые копии не расшифровать прежним.
++  # shellcheck disable=SC1090
++  [[ -f $TG_ENV ]] && pass=$(. "$TG_ENV"; echo "$BACKUP_PASS")
++  pass=${pass:-$(openssl rand -base64 24)}
++  (umask 077; printf 'TG_TOKEN=%q\nTG_CHAT=%q\nBACKUP_PASS=%q\n' "$token" "$chat" "$pass" >"$TG_ENV")
++  echo
++  echo "Пароль для расшифровки бэкапов — ${B}сохраните его в менеджере паролей${N}:"
++  echo
++  echo "  $pass"
++  echo
++  echo "Без него восстановиться из копии в Telegram не получится."
++  echo
++  cmd_backup
+ }
+ 
+ usage() {
+@@ -256,6 +294,7 @@ ${B}kit${N} — пользователи: один пользователь ср
+   kit user off имя  /  kit user on имя                    выключить и включить
+   kit user del имя                                        удалить
+   kit backup [файл]                                       бэкап для переезда (3x-ui.sh --restore)
++  kit backup tg токен chat_id                             слать бэкапы в Telegram (зашифрованными)
+ EOF
+ }
+ 
+@@ -267,6 +306,7 @@ case "${1:-} ${2:-}" in
+   "user off") cmd_toggle "${3:-}" false ;;
+   "user on") cmd_toggle "${3:-}" true ;;
+   "user del") shift 2; cmd_del "$@" ;;
++  "backup tg") shift 2; cmd_backup_tg "$@" ;;
+   "backup "*) shift; cmd_backup "$@" ;;
+   *) usage ;;
+ esac
