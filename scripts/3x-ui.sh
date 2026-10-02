@@ -20,6 +20,7 @@ XRAY_CORE="v26.6.27"
 XUI_REPO="MHSanaei/3x-ui"
 KIT_REPO="xlok1e/3X-UI_KIT"
 KIT_RAW="https://raw.githubusercontent.com/$KIT_REPO/main/scripts"
+HAPP_ROUTING="https://raw.githubusercontent.com/hydraponique/roscomvpn-routing/refs/heads/main/HAPP/DEFAULT.DEEPLINK"
 RESULT=/root/3x-ui.txt
 XUI_ENV=/etc/x-ui/install-result.env
 # Сайты для маскировки REALITY: нужны TLS 1.3 и HTTP/2. Берём первый доступный.
@@ -152,6 +153,7 @@ main() {
       --host) HOST=$2; shift 2 ;;
       --user) NAME=$2; shift 2 ;;
       --protocols) protos=$2; shift 2 ;;
+      --happ-routing) HAPP_ROUTING=$2; shift 2 ;;
       --cert) ucert=$2; shift 2 ;;
       --multi-port) multi=yes; shift ;;
       --key) ukey=$2; shift 2 ;;
@@ -164,6 +166,7 @@ main() {
   [[ $PORT =~ ^[0-9]+$ ]] && ((PORT > 0 && PORT < 65536)) || die "Неверный порт: $PORT"
   [[ $NAME =~ ^[A-Za-z0-9_.-]{1,32}$ ]] || die "Имя: латиница, цифры, _ . - (до 32 символов)."
   [[ $PANEL_SSL =~ ^(auto|ip|none)$ ]] || die "--panel-ssl: auto, ip или none"
+  [[ -n $HAPP_ROUTING ]] || die "--happ-routing: ссылка на профиль, happ://… или none"
   if [[ -n $ucert || -n $ukey ]]; then
     [[ -s $ucert && -s $ukey ]] || die "Нужны оба файла: --cert fullchain.pem --key privkey.pem"
     openssl x509 -in "$ucert" -noout 2>/dev/null || die "$ucert — не сертификат в формате PEM"
@@ -901,6 +904,10 @@ setup_subscription() {
       .subEnable = true | .subPath = $path | .subTitle = $title
       | .subClashEnable = true | .subClashAutoDetect = true | .subJsonEnable = true | .subJsonAutoDetect = true' <<<"$all")
   fi
+  if [[ $HAPP_ROUTING != none ]]; then
+    upd=$(jq -c --arg r "$HAPP_ROUTING" \
+      '.subEnableRouting = true | .subHappAutoDetect = true | .subRoutingRules = $r' <<<"$upd")
+  fi
   if [[ $upd != "$all" ]]; then
     api POST setting/update "$upd" >/dev/null
     systemctl restart x-ui
@@ -999,6 +1006,8 @@ usage() {
   --cert файл --key файл  свой сертификат (например, для домена) вместо Let's Encrypt на IP;
                       тогда --host — это домен из сертификата
   --user admin        имя первого клиента
+  --happ-routing URL  профиль маршрутизации Happ (ссылка на deeplink или happ://…);
+                      по умолчанию RoscomVPN, none — не включать
   --host 1.2.3.4      адрес в ссылке, если IP определился неверно
   --no-ufw            не трогать файрвол
   -y                  не задавать вопросов
