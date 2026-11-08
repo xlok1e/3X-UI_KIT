@@ -409,6 +409,40 @@ connect_api() {
   die "Панель не отвечает. Лог: journalctl -u x-ui -n 50"
 }
 
+# После импорта базы значения панели берём из самой базы через CLI. Файл из
+# бэкапа мог быть создан до смены порта, webBasePath или API-токена.
+sync_xui_connection() {
+  local panel_settings panel_port web_base_path api_token result_tmp
+  panel_settings=$(/usr/local/x-ui/x-ui setting -show true)
+  panel_port=$(awk -F': ' '{key=$1; gsub(/[[:space:]]/, "", key)} key == "port" {gsub(/[[:space:]]/, "", $2); print $2; exit}' <<<"$panel_settings")
+  web_base_path=$(awk -F': ' '{key=$1; gsub(/[[:space:]]/, "", key)} key == "webBasePath" {gsub(/[[:space:]]/, "", $2); sub("^/", "", $2); print $2; exit}' <<<"$panel_settings")
+  api_token=$(/usr/local/x-ui/x-ui setting -getApiToken | grep -Eo 'apiToken: .+' | awk '{print $2; exit}')
+  [[ $panel_port =~ ^[0-9]{1,5}$ ]] && ((panel_port > 0 && panel_port < 65536)) \
+    || die "Не удалось прочитать порт панели из восстановленной базы."
+  [[ $web_base_path =~ ^[A-Za-z0-9._~-]{4,128}$ ]] \
+    || die "Не удалось прочитать webBasePath панели из восстановленной базы."
+  [[ $api_token =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]] \
+    || die "Не удалось прочитать API-токен панели из восстановленной базы."
+
+  # Сохраняем логин и пароль из бэкапа, но синхронизируем параметры API с базой.
+  # shellcheck disable=SC1090
+  . "$XUI_ENV"
+  result_tmp=$(mktemp)
+  {
+    printf 'XUI_USERNAME=%q\n' "${XUI_USERNAME:-}"
+    printf 'XUI_PASSWORD=%q\n' "${XUI_PASSWORD:-}"
+    printf 'XUI_PANEL_PORT=%q\n' "$panel_port"
+    printf 'XUI_WEB_BASE_PATH=%q\n' "$web_base_path"
+    printf 'XUI_ACCESS_URL=%q\n' "${XUI_ACCESS_URL:-}"
+    printf 'XUI_API_TOKEN=%q\n' "$api_token"
+    printf 'XUI_DB_TYPE=%q\n' "${XUI_DB_TYPE:-sqlite}"
+  } >"$result_tmp"
+  install -m 600 "$result_tmp" "$XUI_ENV"
+  rm -f "$result_tmp"
+  # shellcheck disable=SC1090
+  . "$XUI_ENV"
+}
+
 ensure_xray_core() {
   local cur_core
   cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
@@ -475,19 +509,26 @@ restore_ports() { # список подключений (JSON)
 # Чистый сервер + архив: та же панель, те же пользователи и ключи. Ссылки ведут на домен,
 # поэтому после смены A-записи клиенты подключаются без новой подписки.
 restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc из Telegram)
-  local arc=$1 tmp ip list pass
+  local arc=$1 tmp ip list pass decrypted="" is_resume=no
   [[ -s $arc ]] || die "Нет файла бэкапа: $arc"
-  [[ ! -d /usr/local/x-ui ]] || die "Восстанавливать можно только на чистый сервер: здесь уже стоит 3X-UI."
+  if [[ -d /usr/local/x-ui ]]; then
+    [[ -s $XUI_DB && -s $XUI_ENV && -s /etc/kit/kit.env ]] \
+      || die "Здесь уже есть другая установка 3X-UI. Продолжить можно только после прерванного восстановления."
+    is_resume=yes
+    warn "3X-UI уже установлена — продолжаю прерванное восстановление."
+  fi
   install_packages
   if [[ $arc == *.enc ]]; then
     [[ -t 0 ]] || die "Архив зашифрован — запустите восстановление в терминале, чтобы ввести пароль."
     read -rsp "Пароль бэкапа: " pass; echo
-    tmp=$(mktemp)
-    BACKUP_PASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASS -in "$arc" -out "$tmp" \
+    decrypted=$(mktemp)
+    BACKUP_PASS=$pass openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BACKUP_PASS -in "$arc" -out "$decrypted" \
       || die "Неверный пароль или файл повреждён."
-    arc=$tmp
+    arc=$decrypted
   fi
   tmp=$(mktemp -d)
+  # shellcheck disable=SC2064 # значения подставляются до выхода локальных переменных из области видимости
+  trap "rm -rf -- '$tmp'; rm -f -- '${decrypted:-}'" EXIT
   tar -xzf "$arc" -C "$tmp" || die "Архив повреждён: $arc"
   [[ -s $tmp$XUI_DB && -s $tmp$XUI_ENV && -s $tmp/etc/kit/kit.env ]] || die "В архиве нет базы панели или настроек kit."
   [[ -s $tmp/root/cert/custom/fullchain.pem ]] || die "В архиве нет сертификата домена (/root/cert/custom)."
@@ -496,13 +537,12 @@ restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc 
   [[ ! $HOST =~ ^[0-9.]+$ ]] || die "Бэкап сделан на установке с IP ($HOST): ссылки ведут на старый сервер. Переезд без смены подписок работает только с доменом."
 
   ip=$(public_ip)
-  run_xui_installer none "$ip"
+  [[ $is_resume == yes ]] || run_xui_installer none "$ip"
   say "Переношу базу панели, сертификаты и настройки из $arc"
   systemctl stop x-ui
   tar -xzf "$arc" -C /
   systemctl start x-ui
-  # shellcheck disable=SC1090
-  . "$XUI_ENV"
+  sync_xui_connection
   connect_api
   ensure_xray_core
 
