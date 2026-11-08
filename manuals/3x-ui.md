@@ -59,7 +59,7 @@
 Подключитесь к серверу по SSH и выполните:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/3x-ui.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/3x-ui.sh)
 ```
 
 Через пару минут скрипт покажет всё нужное:
@@ -128,6 +128,25 @@ kit user add sasha --gb 50 --days 30
 > Если порт 80 занят, сертификат Let's Encrypt не получить. Тогда скрипт сделает свой
 > сертификат и впишет его отпечаток в ссылки, а панель будет доступна через SSH-туннель.
 > Подписка в этом режиме работает только изнутри сервера — используйте отдельные ссылки.
+
+## Резервная копия и восстановление
+
+Создать копию на старом сервере:
+
+```bash
+kit backup
+```
+
+Скопировать `.tar.gz` или зашифрованный `.tar.gz.enc` на чистый VPS, войти через
+`sudo -i` и запустить **скрипт 3X-UI KIT**, а не официальный `install.sh` панели:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/3x-ui.sh) \
+  --restore /root/kit-ДАТА.tar.gz.enc
+```
+
+Для файла `.enc` скрипт запросит пароль бэкапа. Восстановление поддерживается для
+установки с доменом; заранее направьте A-запись домена на новый VPS (DNS only).
 
 ## Обслуживание
 

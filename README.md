@@ -48,7 +48,7 @@
 Подключитесь к серверу по SSH и выполните:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/itsnotkubrick/3X-UI_KIT/main/scripts/3x-ui.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/xlok1e/3X-UI_KIT/main/scripts/3x-ui.sh)
 ```
 
 Через пару минут скрипт покажет адрес панели, логин, пароль и подписку с QR-кодом.

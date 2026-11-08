@@ -150,6 +150,10 @@ main() {
   local PORT=443 SNI="" PANEL_SSL=auto HOST="" UFW=yes NAME="admin" yes=no protos=all ucert="" ukey="" multi=no RESTORE="" DOMAIN=""
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --port|--sni|--panel-ssl|--host|--user|--protocols|--happ-routing|--domain|--cert|--key|--restore)
+        [[ -n ${2:-} ]] || die "У параметра $1 нет значения (см. --help)." ;;
+    esac
+    case $1 in
       --port) PORT=$2; shift 2 ;;
       --sni) SNI=$2; shift 2 ;;
       --panel-ssl) PANEL_SSL=$2; shift 2 ;;
