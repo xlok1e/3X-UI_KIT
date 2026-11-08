@@ -260,13 +260,7 @@ main() {
   . "$XUI_ENV"
   connect_api
 
-  if [[ $PANEL_SSL == custom ]]; then
-    say "Подключаю ваш сертификат к панели"
-    /usr/local/x-ui/x-ui cert -webCert /root/cert/custom/fullchain.pem -webCertKey /root/cert/custom/privkey.pem >/dev/null 2>&1
-    systemctl restart x-ui
-    API="https://127.0.0.1:$XUI_PANEL_PORT/$XUI_WEB_BASE_PATH/panel/api"
-    wait_panel
-  fi
+  [[ $PANEL_SSL == custom ]] && apply_panel_custom_cert
 
   # Без сертификата панель и подписки не должны торчать наружу по HTTP.
   if [[ $PANEL_SSL == none ]]; then
@@ -451,6 +445,17 @@ sync_xui_connection() {
   . "$XUI_ENV"
 }
 
+apply_panel_custom_cert() {
+  [[ -s $CERT_DIR/fullchain.pem && -s $CERT_DIR/privkey.pem ]] \
+    || die "Нет сертификата панели в $CERT_DIR."
+  say "Подключаю сертификат домена к панели"
+  /usr/local/x-ui/x-ui cert -webCert "$CERT_DIR/fullchain.pem" \
+    -webCertKey "$CERT_DIR/privkey.pem" >/dev/null 2>&1 \
+    || die "3X-UI не приняла сертификат панели."
+  systemctl restart x-ui
+  connect_api
+}
+
 ensure_xray_core() {
   local cur_core
   cur_core=$(/usr/local/x-ui/bin/xray-linux-* version 2>/dev/null | awk 'NR==1 {print "v" $2}')
@@ -559,6 +564,7 @@ restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc 
   # Задание продления acme.sh живёт в crontab, а не в бэкапе — ставим заново.
   if [[ -x $ACME ]]; then "$ACME" --install-cronjob >/dev/null 2>&1 || warn "Не удалось включить продление сертификата: $ACME --install-cronjob"; fi
   setup_tls_cert
+  apply_panel_custom_cert
   list=$(api GET inbounds/list)
   if jq -e 'any(.[]; .remark == "REALITY" and .listen == "127.0.0.1")' <<<"$list" >/dev/null; then SINGLE=yes; fi
   restore_ports "$list"
