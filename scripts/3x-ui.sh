@@ -522,7 +522,7 @@ restore_ports() { # список подключений (JSON)
 # Чистый сервер + архив: та же панель, те же пользователи и ключи. Ссылки ведут на домен,
 # поэтому после смены A-записи клиенты подключаются без новой подписки.
 restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc из Telegram)
-  local arc=$1 tmp ip list pass decrypted="" is_resume=no
+  local arc=$1 tmp ip list pass decrypted="" is_resume=no backup_single=no
   [[ -s $arc ]] || die "Нет файла бэкапа: $arc"
   if [[ -d /usr/local/x-ui ]]; then
     [[ -s $XUI_DB && -s $XUI_ENV && -s /etc/kit/kit.env ]] \
@@ -546,6 +546,8 @@ restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc 
   [[ -s $tmp$XUI_DB && -s $tmp$XUI_ENV && -s $tmp/etc/kit/kit.env ]] || die "В архиве нет базы панели или настроек kit."
   [[ -s $tmp/root/cert/custom/fullchain.pem ]] || die "В архиве нет сертификата домена (/root/cert/custom)."
   HOST=$(. "$tmp/etc/kit/kit.env"; echo "$HOST")
+  backup_single=$(. "$tmp/etc/kit/kit.env"; echo "${SINGLE:-no}")
+  [[ $backup_single =~ ^(yes|no)$ ]] || die "В бэкапе некорректный режим SINGLE: $backup_single"
   rm -rf "$tmp"
   [[ ! $HOST =~ ^[0-9.]+$ ]] || die "Бэкап сделан на установке с IP ($HOST): ссылки ведут на старый сервер. Переезд без смены подписок работает только с доменом."
 
@@ -566,7 +568,9 @@ restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc 
   setup_tls_cert
   apply_panel_custom_cert
   list=$(api GET inbounds/list)
-  if jq -e 'any(.[]; .remark == "REALITY" and .listen == "127.0.0.1")' <<<"$list" >/dev/null; then SINGLE=yes; fi
+  SINGLE=$backup_single
+  # Для старых копий без SINGLE оставляем запасное определение по подключениям.
+  if [[ $SINGLE == no ]] && jq -e 'any(.[]; .listen == "127.0.0.1")' <<<"$list" >/dev/null; then SINGLE=yes; fi
   restore_ports "$list"
   setup_subscription
   if [[ $SINGLE == yes ]]; then setup_nginx; fi
