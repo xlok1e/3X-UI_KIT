@@ -421,11 +421,13 @@ sync_xui_connection() {
   local panel_settings panel_port web_base_path api_token result_tmp
   panel_settings=$(/usr/local/x-ui/x-ui setting -show true)
   panel_port=$(awk -F': ' '{key=$1; gsub(/[[:space:]]/, "", key)} key == "port" {gsub(/[[:space:]]/, "", $2); print $2; exit}' <<<"$panel_settings")
-  web_base_path=$(awk -F': ' '{key=$1; gsub(/[[:space:]]/, "", key)} key == "webBasePath" {gsub(/[[:space:]]/, "", $2); sub("^/", "", $2); print $2; exit}' <<<"$panel_settings")
+  web_base_path=$(awk -F': ' '{key=$1; gsub(/[[:space:]]/, "", key)} key == "webBasePath" {
+    gsub(/[[:space:]]/, "", $2); gsub(/^\/+|\/+$/, "", $2); print $2; exit
+  }' <<<"$panel_settings")
   api_token=$(/usr/local/x-ui/x-ui setting -getApiToken | grep -Eo 'apiToken: .+' | awk '{print $2; exit}')
   [[ $panel_port =~ ^[0-9]{1,5}$ ]] && ((panel_port > 0 && panel_port < 65536)) \
     || die "Не удалось прочитать порт панели из восстановленной базы."
-  [[ $web_base_path =~ ^[A-Za-z0-9._~-]{4,128}$ ]] \
+  [[ $web_base_path =~ ^[A-Za-z0-9._~/-]{4,128}$ && $web_base_path != *..* ]] \
     || die "Не удалось прочитать webBasePath панели из восстановленной базы."
   [[ $api_token =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]] \
     || die "Не удалось прочитать API-токен панели из восстановленной базы."
