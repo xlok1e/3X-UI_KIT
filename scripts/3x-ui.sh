@@ -126,11 +126,17 @@ ART
 main() {
   [[ $EUID -eq 0 ]] || die "Запустите от root: sudo -i, затем команду ещё раз."
   command -v systemctl >/dev/null || die "Нужен systemd."
-  if [[ -f $RESULT && -x /usr/local/x-ui/x-ui ]]; then
+  # До обычных проверок нужно знать, запросил ли пользователь восстановление:
+  # после частично завершившегося restore панель и RESULT уже существуют.
+  local requested_restore=no argument
+  for argument in "$@"; do
+    [[ $argument == --restore ]] && requested_restore=yes
+  done
+  if [[ $requested_restore == no && -f $RESULT && -x /usr/local/x-ui/x-ui ]]; then
     die "3X-UI уже установлена этим скриптом. Управление: команда x-ui, данные для входа: cat $RESULT"
   fi
   # Панель удалили через меню x-ui, а наши файлы остались — убираем их и ставим заново.
-  if [[ -f $RESULT ]]; then
+  if [[ $requested_restore == no && -f $RESULT ]]; then
     warn "Панель 3X-UI удалена, но остались файлы прошлой установки — убираю их."
     systemctl disable --now kit-sub >/dev/null 2>&1 || true
     rm -rf /etc/systemd/system/kit-sub.service /usr/local/lib/kit-sub /etc/kit-sub /etc/kit /usr/local/bin/kit \
