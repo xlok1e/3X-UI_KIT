@@ -555,7 +555,12 @@ restore() { # архив (.tar.gz или зашифрованный .tar.gz.enc 
   [[ $is_resume == yes ]] || run_xui_installer none "$ip"
   say "Переношу базу панели, сертификаты и настройки из $arc"
   systemctl stop x-ui
+  # В архиве лежит целый SQLite-снимок без WAL/SHM. Журналы, созданные новой
+  # установкой, нельзя оставлять рядом: при старте SQLite применит их поверх
+  # восстановленной базы и вернёт пустые настройки, подключения и клиентов.
+  rm -f "$XUI_DB" "$XUI_DB-wal" "$XUI_DB-shm"
   tar -xzf "$arc" -C /
+  [[ -s $XUI_DB ]] || die "После распаковки не найдена база панели: $XUI_DB"
   systemctl start x-ui
   sync_xui_connection
   connect_api
